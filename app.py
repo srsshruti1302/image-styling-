@@ -55,6 +55,22 @@ growth = ((df[target].iloc[-1] - df[target].iloc[-2]) /
           df[target].iloc[-2]) * 100
 
 col1, col2, col3 = st.columns(3)
+# -------------------------------
+# Date Handling (SAFE)
+# -------------------------------
+if 'Date' in df.columns:
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    df = df.dropna(subset=['Date'])
+    df = df.sort_values('Date')
+    time_col = 'Date'
+else:
+    st.warning(
+        "⚠️ Date column not found. "
+        "Ignoring date-based analysis and using record sequence instead."
+    )
+    df['TimeIndex'] = range(1, len(df) + 1)
+    time_col = 'TimeIndex'
+
 
 col1.metric("💰 Latest Revenue", f"{latest_revenue:.2f}")
 col2.metric("📊 Average Revenue", f"{avg_revenue:.2f}")
