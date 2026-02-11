@@ -1,92 +1,166 @@
 import streamlit as st
-import torch
-import torch.optim as optim
-from torchvision import models, transforms
-from PIL import Image
-
-st.set_page_config(page_title="Auto Style Transfer", layout="centered")
-st.title("🎨 Automatic Neural Style Transfer")
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from datetime import timedelta
 
 # -------------------------------
-# Load Fixed Style Image
+# Page Configuration
 # -------------------------------
-STYLE_IMAGE_PATH = "style.jpg"
+st.set_page_config(
+    page_title="InsightForge BI Dashboard",
+    layout="wide"
+)
 
-def load_image(image, max_size=400):
-    image = image.convert("RGB")
-    size = max(image.size)
-    if size > max_size:
-        scale = max_size / size
-        image = image.resize((int(image.size[0]*scale), int(image.size[1]*scale)))
-    transform = transforms.ToTensor()
-    return transform(image).unsqueeze(0).to(device)
+st.title("📊 InsightForge: LSTM-Driven GenAI Business Intelligence Dashboard")
 
 # -------------------------------
-# Gram Matrix
+# Upload Company Data
 # -------------------------------
-def gram_matrix(tensor):
-    b, c, h, w = tensor.size()
-    features = tensor.view(c, h * w)
-    return torch.mm(features, features.t())
+uploaded_file = st.file_uploader(
+    "Upload Company CSV File",
+    type=["csv"]
+)
 
-# -------------------------------
-# VGG Model
-# -------------------------------
-vgg = models.vgg19(pretrained=True).features.to(device).eval()
+if uploaded_file is None:
+    st.info("Please upload a company CSV file to continue.")
+    st.stop()
 
-layers = {'0':'conv1','5':'conv2','10':'conv3','19':'conv4','28':'conv5'}
-
-def get_features(image):
-    features = {}
-    x = image
-    for name, layer in vgg._modules.items():
-        x = layer(x)
-        if name in layers:
-            features[layers[name]] = x
-    return features
+df = pd.read_csv(uploaded_file)
+df['Date'] = pd.to_datetime(df['Date'])
+df = df.sort_values('Date')
 
 # -------------------------------
-# UI
+# Feature Selection
 # -------------------------------
-content_file = st.file_uploader("Upload Content Image", type=["jpg","png"])
+features = [
+    'Sales',
+    'Orders',
+    'Customers',
+    'MarketingSpend',
+    'Returns'
+]
 
-if content_file:
-    content_img = Image.open(content_file)
-    st.image(content_img, caption="Content Image", use_container_width=True)
+target = 'Revenue'
 
-    if st.button("✨ Apply Artistic Style"):
-        with st.spinner("Stylizing image..."):
-            content = load_image(content_img)
-            style = load_image(Image.open(STYLE_IMAGE_PATH))
+# -------------------------------
+# KPI Section
+# -------------------------------
+latest_revenue = df[target].iloc[-1]
+avg_revenue = df[target].mean()
+growth = ((df[target].iloc[-1] - df[target].iloc[-2]) /
+          df[target].iloc[-2]) * 100
 
-            content_features = get_features(content)
-            style_features = get_features(style)
-            style_grams = {k: gram_matrix(v) for k, v in style_features.items()}
+col1, col2, col3 = st.columns(3)
 
-            generated = content.clone().requires_grad_(True)
-            optimizer = optim.Adam([generated], lr=0.003)
+col1.metric("💰 Latest Revenue", f"{latest_revenue:.2f}")
+col2.metric("📊 Average Revenue", f"{avg_revenue:.2f}")
+col3.metric("📈 Growth (%)", f"{growth:.2f}%")
 
-            for _ in range(300):
-                gen_features = get_features(generated)
+# -------------------------------
+# Scale Data
+# -------------------------------
+scaler_X = MinMaxScaler()
+scaler_y = MinMaxScaler()
 
-                content_loss = torch.mean(
-                    (gen_features['conv4'] - content_features['conv4'])**2
-                )
+X_scaled = scaler_X.fit_transform(df[features])
+y_scaled = scaler_y.fit_transform(df[[target]])
 
-                style_loss = sum(
-                    torch.mean((gram_matrix(gen_features[l]) - style_grams[l])**2)
-                    for l in style_grams
-                )
+# -------------------------------
+# Create Sequences
+# -------------------------------
+def create_sequences(X, y, window=10):
+    X_seq, y_seq = [], []
+    for i in range(len(X) - window):
+        X_seq.append(X[i:i+window])
+        y_seq.append(y[i+window])
+    return np.array(X_seq), np.array(y_seq)
 
-                loss = 1e4 * content_loss + 1e2 * style_loss
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+window = 10
+X, y = create_sequences(X_scaled, y_scaled, window)
 
-            output = generated.squeeze(0).detach().cpu()
-            output = transforms.ToPILImage()(output)
+# -------------------------------
+# LSTM Model
+# -------------------------------
+model = Sequential([
+    LSTM(64, return_sequences=True,
+         input_shape=(window, len(features))),
+    LSTM(32),
+    Dense(1)
+])
 
-            st.subheader("🎉 Stylized Output")
-            st.image(output, use_container_width=True)
+model.compile(
+    optimizer='adam',
+    loss='mse'
+)
+
+model.fit(X, y, epochs=20, batch_size=16, verbose=0)
+
+# -------------------------------
+# Forecast Future Revenue
+# -------------------------------
+future_days = 15
+last_seq = X_scaled[-window:]
+forecast = []
+
+current_seq = last_seq.copy()
+
+for _ in range(future_days):
+    pred = model.predict(
+        current_seq.reshape(1, window, len(features)),
+        verbose=0
+    )
+    forecast.append(pred[0][0])
+
+    next_features = current_seq[-1]
+    current_seq = np.vstack([current_seq[1:], next_features])
+
+forecast = scaler_y.inverse_transform(
+    np.array(forecast).reshape(-1, 1)
+)
+
+future_dates = [
+    df['Date'].iloc[-1] + timedelta(days=i+1)
+    for i in range(future_days)
+]
+
+# -------------------------------
+# Visualization Section
+# -------------------------------
+st.subheader("📉 Revenue Trend & Forecast")
+
+fig, ax = plt.subplots()
+ax.plot(df['Date'], df['Revenue'], label="Historical Revenue")
+ax.plot(future_dates, forecast,
+        linestyle='--', label="Forecast Revenue")
+
+ax.set_xlabel("Date")
+ax.set_ylabel("Revenue")
+ax.legend()
+
+st.pyplot(fig)
+
+# -------------------------------
+# GenAI-Style Insight Panel
+# -------------------------------
+trend = "increasing" if forecast.mean() > latest_revenue else "decreasing"
+
+st.markdown("### 🤖 AI-Generated Business Insights")
+st.write(f"""
+• The overall revenue trend is **{trend}**  
+• Predicted average revenue for next {future_days} days is **{forecast.mean():.2f}**  
+• Recent growth rate is **{growth:.2f}%**  
+• Business performance remains stable with moderate variability  
+
+📌 **Recommendation:**  
+Monitor marketing spend and customer acquisition to sustain growth.
+""")
+
+# -------------------------------
+# Raw Data View
+# -------------------------------
+with st.expander("📂 View Uploaded Data"):
+    st.dataframe(df)
